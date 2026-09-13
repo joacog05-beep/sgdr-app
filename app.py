@@ -5,15 +5,15 @@ from datetime import datetime
 import requests
 import os
 import unicodedata
+from shapely.geometry import shape, mapping
+from shapely.ops import unary_union
 
 st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
 
-# Función para igualar nombres de barrios (ignora tildes y mayúsculas)
 def normalizar(texto):
     if not isinstance(texto, str): return ""
     return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8').strip().upper()
 
-# Conexión con el mapa cartográfico oficial de CABA
 @st.cache_data
 def cargar_geojson_caba():
     url = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
@@ -37,7 +37,6 @@ perfil_usuario = st.sidebar.radio(
 # Módulo 1: formulario móvil para cuadrillas
 # ---------------------------------------------------------
 if perfil_usuario == "soy barrendero (reporte de campo)":
-    
     if os.path.exists("logo.png"):
         st.image("logo.png", width=150)
     else:
@@ -132,7 +131,7 @@ else:
     if df.empty:
         st.error("⚠️ no se pudieron procesar las coordenadas del archivo seleccionado.")
     else:
-        # Nuevo diccionario con las concesiones 100% corregidas
+        # ZONAS OFICIALES ACTUALIZADAS
         zonas_caba = {
             "Zona 1 (AESA)": ["Retiro", "San Nicolás", "Monserrat", "Puerto Madero", "San Telmo", "Constitución"],
             "Zona 2 (Cliba)": ["Recoleta", "Palermo", "Belgrano", "Colegiales", "Núñez"],
@@ -161,24 +160,39 @@ else:
                 df = df[df['barrio'] == barrio_seleccionado]
 
         # ---------------------------------------------------------
-        # Capa de dibujo cartográfico: delimita la zona elegida
+        # FUSIÓN DE POLÍGONOS (Evita las rayas internas)
         # ---------------------------------------------------------
         if zona_seleccionada != "Todas las Zonas":
             geojson_data = cargar_geojson_caba()
             if geojson_data:
                 barrios_zona_norm = [normalizar(b) for b in barrios_zona]
-                features_filtrados = []
+                poligonos_a_fusionar = []
                 
                 for feature in geojson_data.get('features', []):
                     nombre_barrio = feature['properties'].get('BARRIO', feature['properties'].get('barrio', ''))
                     nombre_norm = normalizar(nombre_barrio)
                     
-                    # Excepción por si el mapa oficial usa "Montserrat" en lugar de "Monserrat"
                     if nombre_norm in barrios_zona_norm or (nombre_norm == 'MONTSERRAT' and 'MONSERRAT' in barrios_zona_norm):
-                        features_filtrados.append(feature)
+                        poligono = shape(feature['geometry'])
+                        # "Inflamos" milimétricamente cada barrio para tapar los huecos del mapa del GCBA
+                        poligono = poligono.buffer(0.0001)
+                        poligonos_a_fusionar.append(poligono)
                 
-                if features_filtrados:
-                    geojson_filtrado = {"type": "FeatureCollection", "features": features_filtrados}
+                if poligonos_a_fusionar:
+                    # Derretimos todos los barrios en una sola mancha gigante
+                    zona_fusionada = unary_union(poligonos_a_fusionar)
+                    # "Desinflamos" a su tamaño original
+                    zona_fusionada = zona_fusionada.buffer(-0.0001)
+                    
+                    geojson_filtrado = {
+                        "type": "FeatureCollection", 
+                        "features": [{
+                            "type": "Feature",
+                            "geometry": mapping(zona_fusionada),
+                            "properties": {"zona": zona_seleccionada}
+                        }]
+                    }
+                    
                     capa_bordes = pdk.Layer(
                         "GeoJsonLayer",
                         data=geojson_filtrado,
@@ -187,9 +201,9 @@ else:
                         filled=True,
                         extruded=False,
                         wireframe=True,
-                        get_fill_color=[0, 150, 255, 15],  # un tono azul muy leve
-                        get_line_color=[0, 200, 255, 200], # un borde cyan brillante
-                        get_line_width=50,
+                        get_fill_color=[0, 150, 255, 10],  # Relleno apenas perceptible
+                        get_line_color=[0, 200, 255, 255], # Borde exterior de neón 100% nítido
+                        get_line_width=60,
                     )
                     capas.append(capa_bordes)
 
