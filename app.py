@@ -123,8 +123,3 @@ else:
         initial_view_state=vista_inicial,
         layers=[capa_calor],
     ))
-    map_provider="carto",
-    map_style="light",
-    initial_view_state=vista_inicial,
-    layers=[capa_calor],
-))
