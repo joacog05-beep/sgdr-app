@@ -131,7 +131,6 @@ else:
     if df.empty:
         st.error("⚠️ no se pudieron procesar las coordenadas del archivo seleccionado.")
     else:
-        # ZONAS OFICIALES ACTUALIZADAS
         zonas_caba = {
             "Zona 1 (AESA)": ["Retiro", "San Nicolás", "Monserrat", "Puerto Madero", "San Telmo", "Constitución"],
             "Zona 2 (Cliba)": ["Recoleta", "Palermo", "Belgrano", "Colegiales", "Núñez"],
@@ -159,9 +158,7 @@ else:
             if barrio_seleccionado not in ["Todos los Barrios", "Todos los Barrios de la Zona"]:
                 df = df[df['barrio'] == barrio_seleccionado]
 
-        # ---------------------------------------------------------
-        # FUSIÓN DE POLÍGONOS (Evita las rayas internas)
-        # ---------------------------------------------------------
+        # Fusión de polígonos
         if zona_seleccionada != "Todas las Zonas":
             geojson_data = cargar_geojson_caba()
             if geojson_data:
@@ -174,16 +171,11 @@ else:
                     
                     if nombre_norm in barrios_zona_norm or (nombre_norm == 'MONTSERRAT' and 'MONSERRAT' in barrios_zona_norm):
                         poligono = shape(feature['geometry'])
-                        # "Inflamos" milimétricamente cada barrio para tapar los huecos del mapa del GCBA
                         poligono = poligono.buffer(0.0001)
                         poligonos_a_fusionar.append(poligono)
                 
                 if poligonos_a_fusionar:
-                    # Derretimos todos los barrios en una sola mancha gigante
-                    zona_fusionada = unary_union(poligonos_a_fusionar)
-                    # "Desinflamos" a su tamaño original
-                    zona_fusionada = zona_fusionada.buffer(-0.0001)
-                    
+                    zona_fusionada = unary_union(poligonos_a_fusionar).buffer(-0.0001)
                     geojson_filtrado = {
                         "type": "FeatureCollection", 
                         "features": [{
@@ -201,8 +193,8 @@ else:
                         filled=True,
                         extruded=False,
                         wireframe=True,
-                        get_fill_color=[0, 150, 255, 10],  # Relleno apenas perceptible
-                        get_line_color=[0, 200, 255, 255], # Borde exterior de neón 100% nítido
+                        get_fill_color=[0, 150, 255, 10],
+                        get_line_color=[0, 200, 255, 255], 
                         get_line_width=60,
                     )
                     capas.append(capa_bordes)
@@ -210,32 +202,80 @@ else:
         st.sidebar.markdown("---")
         escenario = st.sidebar.radio(
             "4. Simulación predictiva",
-            ["operación normal", "alerta de tormenta"]
+            ["operación normal", "alerta de tormenta", "eventos masivos (exclusión)"]
         )
 
         if escenario == "operación normal":
             st.write(f"Densidad de demanda ({tipo_recolector})")
-            radio_impacto = 80
-            intensidad = 1
-            color_rango = [[255, 255, 178], [254, 204, 92], [253, 141, 60], [240, 59, 32], [189, 0, 38]]
-        else:
+            capa_calor = pdk.Layer(
+                "HeatmapLayer", data=df, get_position=["long", "lat"], opacity=0.8,
+                get_weight=1, radiusPixels=80, intensity=1,
+                colorRange=[[255, 255, 178], [254, 204, 92], [253, 141, 60], [240, 59, 32], [189, 0, 38]]
+            )
+            capas.append(capa_calor)
+            
+        elif escenario == "alerta de tormenta":
             st.write("Intervención de emergencia: riesgo de anegamiento")
-            radio_impacto = 250
-            intensidad = 4
-            color_rango = [[254, 229, 217], [252, 174, 145], [251, 106, 74], [222, 45, 38], [165, 15, 21]]
+            capa_calor = pdk.Layer(
+                "HeatmapLayer", data=df, get_position=["long", "lat"], opacity=0.8,
+                get_weight=1, radiusPixels=250, intensity=4,
+                colorRange=[[254, 229, 217], [252, 174, 145], [251, 106, 74], [222, 45, 38], [165, 15, 21]]
+            )
+            capas.append(capa_calor)
+            
+        else:
+            st.write("Anillo de exclusión logística y redirección de cuadrillas")
+            # Mapa de calor difuminado de fondo
+            capa_calor = pdk.Layer(
+                "HeatmapLayer", data=df, get_position=["long", "lat"], opacity=0.25,
+                get_weight=1, radiusPixels=80, intensity=1,
+                colorRange=[[255, 255, 178], [254, 204, 92], [253, 141, 60], [240, 59, 32], [189, 0, 38]]
+            )
+            capas.append(capa_calor)
 
-        capa_calor = pdk.Layer(
-            "HeatmapLayer",
-            data=df,
-            get_position=["long", "lat"],
-            opacity=0.8,
-            get_weight=1,
-            radiusPixels=radio_impacto,
-            intensity=intensidad,
-            colorRange=color_rango
-        )
-        capas.append(capa_calor)
+            coordenadas_eventos = {
+                "Estadio River Plate (80.000 aforo)": {"lat": -34.5453, "long": -58.4497},
+                "Movistar Arena (15.000 aforo)": {"lat": -34.5944, "long": -58.4458},
+                "Estadio Vélez Sarsfield (49.000 aforo)": {"lat": -34.6354, "long": -58.5207},
+                "Obelisco (Concentración pública)": {"lat": -34.6037, "long": -58.3816},
+                "Parque de la Ciudad (Festivales)": {"lat": -34.6738, "long": -58.4494}
+            }
+            
+            evento_seleccionado = st.selectbox(
+                "Seleccionar epicentro autorizado (Datos GCBA 2026):",
+                list(coordenadas_eventos.keys())
+            )
+            
+            coord = coordenadas_eventos[evento_seleccionado]
+            df_evento = pd.DataFrame([coord])
+            
+            # Anillo rojo de 800 metros
+            capa_exclusion = pdk.Layer(
+                "ScatterplotLayer",
+                data=df_evento,
+                get_position=["long", "lat"],
+                get_fill_color=[255, 0, 0, 80], 
+                get_line_color=[255, 0, 0, 255],
+                get_radius=800,
+                stroked=True,
+                filled=True,
+                line_width_min_pixels=3,
+            )
+            capas.append(capa_exclusion)
+            
+            # Punto central negro
+            capa_centro = pdk.Layer(
+                "ScatterplotLayer",
+                data=df_evento,
+                get_position=["long", "lat"],
+                get_fill_color=[0, 0, 0, 255],
+                get_radius=40,
+            )
+            capas.append(capa_centro)
 
+        # ---------------------------------------------------------
+        # Lógica de ruteo por asfalto
+        # ---------------------------------------------------------
         if zona_seleccionada != "Todas las Zonas":
             st.sidebar.markdown("---")
             simular_ruta = st.sidebar.checkbox("5. Generar ruta óptima por asfalto (IA)")
@@ -286,7 +326,14 @@ else:
                 )
                 capas.append(capa_puntos)
 
-        if not df.empty:
+        # ---------------------------------------------------------
+        # Lógica de cámara inteligente (Zoom)
+        # ---------------------------------------------------------
+        if escenario == "eventos masivos (exclusión)":
+            lat_centro = coord["lat"]
+            lon_centro = coord["long"]
+            zoom_nivel = 14
+        elif not df.empty:
             lat_centro = df['lat'].mean()
             lon_centro = df['long'].mean()
             zoom_nivel = 13.5 if ('barrio_seleccionado' in locals() and barrio_seleccionado not in ["Todos los Barrios", "Todos los Barrios de la Zona"]) else 12.5
