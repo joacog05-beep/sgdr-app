@@ -2,28 +2,41 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 from datetime import datetime
+import requests
+import os
 
-st.set_page_config(layout="wide", page_title="SGDR CABA")
+st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
 
-# Selector principal de acceso en el panel lateral
-st.sidebar.title("Plataforma SGDR")
+# Carga dinámica del logo corporativo
+if os.path.exists("logo.png"):
+    st.sidebar.image("logo.png", use_container_width=True)
+else:
+    st.sidebar.title("Plataforma G.I.R.A.R.")
+
 perfil_usuario = st.sidebar.radio(
-    "Seleccionar rol:",
-    ["Centro de control (despacho)", "Soy barrendero (reporte de campo)"]
+    "Seleccionar rol operativo",
+    ["centro de control (despacho)", "soy barrendero (reporte de campo)"]
 )
 
 # ---------------------------------------------------------
-# MÓDULO 1: FORMULARIO MÓVIL PARA CUADRILLAS / BARRENDEROS
+# Módulo 1: formulario móvil para cuadrillas
 # ---------------------------------------------------------
-if perfil_usuario == "Soy barrendero (reporte de campo)":
-    st.title("Reporte operativo de cuadrilla")
+if perfil_usuario == "soy barrendero (reporte de campo)":
+    
+    # Mostrar el logo también en la vista principal del celular
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=150)
+    else:
+        st.title("G.I.R.A.R.")
+        
+    st.subheader("Reporte operativo de cuadrilla")
     st.caption("interfaz ligera de relevamiento en tiempo real.")
 
     with st.form("formulario_operario", clear_on_submit=True):
-        st.subheader("Datos de la intervención")
+        st.write("Datos de la intervención")
         
         zona_operario = st.selectbox(
-            "Zona de concesión asignada:",
+            "Zona de concesión asignada",
             [
                 "Zona 1 (Cliba)", "Zona 2 (AESA)", "Zona 3 (Urbaser)",
                 "Zona 4 (Ashira)", "Zona 5 (Nittida)", "Zona 6 (EHU)", "Zona 7 (Solbayres)"
@@ -31,35 +44,35 @@ if perfil_usuario == "Soy barrendero (reporte de campo)":
         )
         
         ubicacion = st.text_input(
-            "Ubicación aproximada:",
+            "Ubicación aproximada",
             placeholder="ej. Av. Santa Fe y Callao"
         )
         
         estado_contenedor = st.selectbox(
-            "Nivel de llenado del contenedor:",
+            "Nivel de llenado del contenedor",
             [
-                "Normal (capacidad disponible)",
-                "Carga crítica (más del 80%)",
-                "Desbordado (residuos dispersos en vereda)"
+                "normal (capacidad disponible)",
+                "carga crítica (más del 80%)",
+                "desbordado (residuos dispersos en vereda)"
             ]
         )
         
         estado_sumidero = st.radio(
-            "Estado del sumidero o desagüe pluvial:",
+            "Estado del sumidero o desagüe pluvial",
             [
-                "Despejado",
-                "Obstrucción parcial por hojas o restos",
-                "Bloqueo crítico (riesgo inmediato de anegamiento)"
+                "despejado",
+                "obstrucción parcial por hojas o restos",
+                "bloqueo crítico (riesgo inmediato de anegamiento)"
             ]
         )
         
         tipo_material = st.multiselect(
-            "Material excedente observado:",
-            ["Orgánico / húmedo", "Cartón y papel", "Plástico", "Escombros / voluminosos"]
+            "Material excedente observado",
+            ["orgánico / húmedo", "cartón y papel", "plástico", "escombros / voluminosos"]
         )
         
         observaciones = st.text_area(
-            "Observaciones de campo:",
+            "Observaciones de campo",
             placeholder="ej. contenedor vandalizado o acceso bloqueado por vehículos mal estacionados."
         )
         
@@ -71,21 +84,21 @@ if perfil_usuario == "Soy barrendero (reporte de campo)":
             st.info("alerta incorporada al cálculo dinámico de prioridades logísticas.")
 
 # ---------------------------------------------------------
-# MÓDULO 2: CENTRO DE CONTROL LOGÍSTICO Y RUTEO
+# Módulo 2: centro de control logístico y ruteo
 # ---------------------------------------------------------
 else:
-    st.title("Sistema de gestión dinámica de residuos")
+    st.subheader("Sistema de gestión dinámica de residuos")
     st.sidebar.markdown("---")
-    st.sidebar.header("Parámetros de ruteo")
+    st.sidebar.write("Parámetros de ruteo")
 
     tipo_recolector = st.sidebar.radio(
-        "1. Tipo de recolección:",
-        ["Húmedos (Gastronómicos)", "Secos (Reciclables)"]
+        "1. Tipo de recolección",
+        ["húmedos (gastronómicos)", "secos (reciclables)"]
     )
 
     @st.cache_data
     def cargar_datos(tipo):
-        archivo = "oferta_gastronomica_raw.xlsx" if tipo == "Húmedos (Gastronómicos)" else "recolectores_secos.xlsx"
+        archivo = "oferta_gastronomica_raw.xlsx" if tipo == "húmedos (gastronómicos)" else "recolectores_secos.xlsx"
         try:
             df = pd.read_excel(archivo)
             if 'lat' in df.columns and 'long' in df.columns:
@@ -116,7 +129,7 @@ else:
         }
 
         lista_zonas = ["Todas las Zonas"] + list(zonas_caba.keys())
-        zona_seleccionada = st.sidebar.selectbox("2. Filtrar por zona de concesión:", lista_zonas)
+        zona_seleccionada = st.sidebar.selectbox("2. Filtrar por zona de concesión", lista_zonas)
 
         if 'barrio' in df.columns:
             if zona_seleccionada == "Todas las Zonas":
@@ -127,24 +140,24 @@ else:
                 barrios_disponibles = ["Todos los Barrios de la Zona"] + sorted(barrios_existentes)
                 df = df[df['barrio'].isin(barrios_zona)]
 
-            barrio_seleccionado = st.sidebar.selectbox("3. Filtrar por barrio específico:", barrios_disponibles)
+            barrio_seleccionado = st.sidebar.selectbox("3. Filtrar por barrio específico", barrios_disponibles)
             
             if barrio_seleccionado not in ["Todos los Barrios", "Todos los Barrios de la Zona"]:
                 df = df[df['barrio'] == barrio_seleccionado]
 
         st.sidebar.markdown("---")
         escenario = st.sidebar.radio(
-            "4. Simulación predictiva:",
-            ["Operación Normal", "Alerta de Tormenta"]
+            "4. Simulación predictiva",
+            ["operación normal", "alerta de tormenta"]
         )
 
-        if escenario == "Operación Normal":
-            st.subheader(f"Densidad de demanda ({tipo_recolector})")
+        if escenario == "operación normal":
+            st.write(f"Densidad de demanda ({tipo_recolector})")
             radio_impacto = 80
             intensidad = 1
             color_rango = [[255, 255, 178], [254, 204, 92], [253, 141, 60], [240, 59, 32], [189, 0, 38]]
         else:
-            st.subheader("Intervención de emergencia: riesgo de anegamiento")
+            st.write("Intervención de emergencia: riesgo de anegamiento")
             radio_impacto = 250
             intensidad = 4
             color_rango = [[254, 229, 217], [252, 174, 145], [251, 106, 74], [222, 45, 38], [165, 15, 21]]
@@ -163,12 +176,13 @@ else:
 
         if zona_seleccionada != "Todas las Zonas":
             st.sidebar.markdown("---")
-            simular_ruta = st.sidebar.checkbox("5. Generar ruta óptima (IA)")
+            simular_ruta = st.sidebar.checkbox("5. Generar ruta óptima por asfalto (IA)")
             
             if simular_ruta and not df.empty:
                 muestra = df.sample(min(15, len(df)), random_state=42)
                 puntos = muestra[['long', 'lat']].values.tolist()
                 
+                # ordenamiento lógico inicial
                 ruta_optima = [puntos.pop(0)]
                 while puntos:
                     ultimo = ruta_optima[-1]
@@ -176,9 +190,25 @@ else:
                     ruta_optima.append(siguiente)
                     puntos.remove(siguiente)
                 
+                # petición a la API de trazado de calles reales
+                coordenadas_str = ";".join([f"{p[0]},{p[1]}" for p in ruta_optima])
+                url_osrm = f"http://router.project-osrm.org/route/v1/driving/{coordenadas_str}?geometries=geojson&overview=full"
+                
+                try:
+                    respuesta = requests.get(url_osrm, timeout=5)
+                    datos_ruta = respuesta.json()
+                    
+                    if datos_ruta.get('code') == 'Ok':
+                        geometria_real = datos_ruta['routes'][0]['geometry']['coordinates']
+                        camino_final = [{"path": geometria_real}]
+                    else:
+                        camino_final = [{"path": ruta_optima}]
+                except:
+                    camino_final = [{"path": ruta_optima}]
+                
                 capa_ruta = pdk.Layer(
                     "PathLayer",
-                    data=[{"path": ruta_optima}],
+                    data=camino_final,
                     get_path="path",
                     get_color=[0, 100, 255, 255],
                     width_scale=20,
