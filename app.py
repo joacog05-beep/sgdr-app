@@ -4,10 +4,25 @@ import pydeck as pdk
 from datetime import datetime
 import requests
 import os
+import unicodedata
 
 st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
 
-# Carga dinámica del logo corporativo
+# Función para igualar nombres de barrios (ignora tildes y mayúsculas)
+def normalizar(texto):
+    if not isinstance(texto, str): return ""
+    return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8').strip().upper()
+
+# Conexión con el mapa cartográfico oficial de CABA
+@st.cache_data
+def cargar_geojson_caba():
+    url = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+    try:
+        r = requests.get(url, timeout=5)
+        return r.json()
+    except:
+        return None
+
 if os.path.exists("logo.png"):
     st.sidebar.image("logo.png", use_container_width=True)
 else:
@@ -23,7 +38,6 @@ perfil_usuario = st.sidebar.radio(
 # ---------------------------------------------------------
 if perfil_usuario == "soy barrendero (reporte de campo)":
     
-    # Mostrar el logo también en la vista principal del celular
     if os.path.exists("logo.png"):
         st.image("logo.png", width=150)
     else:
@@ -38,8 +52,8 @@ if perfil_usuario == "soy barrendero (reporte de campo)":
         zona_operario = st.selectbox(
             "Zona de concesión asignada",
             [
-                "Zona 1 (Cliba)", "Zona 2 (AESA)", "Zona 3 (Urbaser)",
-                "Zona 4 (Ashira)", "Zona 5 (Nittida)", "Zona 6 (EHU)", "Zona 7 (Solbayres)"
+                "Zona 1 (AESA)", "Zona 2 (Cliba)", "Zona 3 (Solbayres)",
+                "Zona 4 (Nittida)", "Zona 5 (EHU)", "Zona 6 (Ashira)", "Zona 7 (Urbasur)"
             ]
         )
         
@@ -118,14 +132,15 @@ else:
     if df.empty:
         st.error("⚠️ no se pudieron procesar las coordenadas del archivo seleccionado.")
     else:
+        # Nuevo diccionario con las concesiones 100% corregidas
         zonas_caba = {
-            "Zona 1 (Cliba)": ["Retiro", "San Nicolás", "Puerto Madero", "San Telmo", "Montserrat", "Constitución"],
-            "Zona 2 (AESA)": ["Recoleta", "Palermo", "Belgrano", "Colegiales", "Núñez"],
-            "Zona 3 (Urbaser)": ["Balvanera", "San Cristóbal", "La Boca", "Barracas", "Parque Patricios", "Nueva Pompeya"],
-            "Zona 4 (Ashira)": ["Almagro", "Boedo", "Caballito", "Parque Chacabuco"],
-            "Zona 5 (Nittida)": ["Villa Real", "Monte Castro", "Versalles", "Floresta", "Vélez Sársfield", "Villa Luro", "Liniers", "Mataderos", "Parque Avellaneda"],
-            "Zona 6 (EHU)": ["Villa Soldati", "Villa Lugano", "Villa Riachuelo"],
-            "Zona 7 (Solbayres)": ["Agronomía", "Chacarita", "Parque Chas", "Paternal", "Villa Crespo", "Villa del Parque", "Villa Devoto", "Villa Gral. Mitre", "Villa Ortúzar", "Villa Pueyrredón", "Villa Santa Rita", "Villa Urquiza"]
+            "Zona 1 (AESA)": ["Retiro", "San Nicolás", "Monserrat", "Puerto Madero", "San Telmo", "Constitución"],
+            "Zona 2 (Cliba)": ["Recoleta", "Palermo", "Belgrano", "Colegiales", "Núñez"],
+            "Zona 3 (Solbayres)": ["Villa Crespo", "Chacarita", "Paternal", "Villa Ortúzar", "Parque Chas", "Agronomía", "Saavedra", "Coghlan", "Villa Urquiza", "Villa Pueyrredón", "Villa Devoto", "Villa del Parque", "Villa Santa Rita", "Villa General Mitre"],
+            "Zona 4 (Nittida)": ["Parque Avellaneda", "Mataderos", "Liniers", "Villa Luro", "Versalles", "Vélez Sársfield", "Floresta", "Monte Castro", "Villa Real"],
+            "Zona 5 (EHU)": ["Villa Lugano", "Villa Riachuelo", "Villa Soldati"],
+            "Zona 6 (Ashira)": ["Flores", "Parque Chacabuco", "Caballito", "Boedo", "Almagro"],
+            "Zona 7 (Urbasur)": ["Balvanera", "San Cristóbal", "Nueva Pompeya", "Parque Patricios", "Barracas", "La Boca"]
         }
 
         lista_zonas = ["Todas las Zonas"] + list(zonas_caba.keys())
@@ -144,6 +159,39 @@ else:
             
             if barrio_seleccionado not in ["Todos los Barrios", "Todos los Barrios de la Zona"]:
                 df = df[df['barrio'] == barrio_seleccionado]
+
+        # ---------------------------------------------------------
+        # Capa de dibujo cartográfico: delimita la zona elegida
+        # ---------------------------------------------------------
+        if zona_seleccionada != "Todas las Zonas":
+            geojson_data = cargar_geojson_caba()
+            if geojson_data:
+                barrios_zona_norm = [normalizar(b) for b in barrios_zona]
+                features_filtrados = []
+                
+                for feature in geojson_data.get('features', []):
+                    nombre_barrio = feature['properties'].get('BARRIO', feature['properties'].get('barrio', ''))
+                    nombre_norm = normalizar(nombre_barrio)
+                    
+                    # Excepción por si el mapa oficial usa "Montserrat" en lugar de "Monserrat"
+                    if nombre_norm in barrios_zona_norm or (nombre_norm == 'MONTSERRAT' and 'MONSERRAT' in barrios_zona_norm):
+                        features_filtrados.append(feature)
+                
+                if features_filtrados:
+                    geojson_filtrado = {"type": "FeatureCollection", "features": features_filtrados}
+                    capa_bordes = pdk.Layer(
+                        "GeoJsonLayer",
+                        data=geojson_filtrado,
+                        opacity=0.15,
+                        stroked=True,
+                        filled=True,
+                        extruded=False,
+                        wireframe=True,
+                        get_fill_color=[0, 150, 255, 15],  # un tono azul muy leve
+                        get_line_color=[0, 200, 255, 200], # un borde cyan brillante
+                        get_line_width=50,
+                    )
+                    capas.append(capa_bordes)
 
         st.sidebar.markdown("---")
         escenario = st.sidebar.radio(
@@ -182,7 +230,6 @@ else:
                 muestra = df.sample(min(15, len(df)), random_state=42)
                 puntos = muestra[['long', 'lat']].values.tolist()
                 
-                # ordenamiento lógico inicial
                 ruta_optima = [puntos.pop(0)]
                 while puntos:
                     ultimo = ruta_optima[-1]
@@ -190,7 +237,6 @@ else:
                     ruta_optima.append(siguiente)
                     puntos.remove(siguiente)
                 
-                # petición a la API de trazado de calles reales
                 coordenadas_str = ";".join([f"{p[0]},{p[1]}" for p in ruta_optima])
                 url_osrm = f"http://router.project-osrm.org/route/v1/driving/{coordenadas_str}?geometries=geojson&overview=full"
                 
