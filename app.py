@@ -112,56 +112,112 @@ if perfil_usuario == "soy barrendero (reporte de campo)":
     st.subheader("Reporte operativo de cuadrilla")
     st.caption("interfaz ligera de relevamiento en tiempo real.")
 
-    with st.form("formulario_operario", clear_on_submit=True):
-        st.write("Datos de la intervención")
-        
-        zona_operario = st.selectbox(
-            "Zona de concesión asignada",
-            [
-                "Zona 1 (AESA)", "Zona 2 (Cliba)", "Zona 3 (Solbayres)",
-                "Zona 4 (Nittida)", "Zona 5 (EHU)", "Zona 6 (Ashira)", "Zona 7 (Urbasur)"
-            ]
-        )
-        
-        ubicacion = st.text_input(
-            "Ubicación aproximada",
-            placeholder="ej. Av. Santa Fe y Callao"
-        )
-        
-        estado_contenedor = st.selectbox(
-            "Nivel de llenado del contenedor",
-            [
-                "normal (capacidad disponible)",
-                "carga crítica (más del 80%)",
-                "desbordado (residuos dispersos en vereda)"
-            ]
-        )
-        
-        estado_sumidero = st.radio(
-            "Estado del sumidero o desagüe pluvial",
-            [
-                "despejado",
-                "obstrucción parcial por hojas o restos",
-                "bloqueo crítico (riesgo inmediato de anegamiento)"
-            ]
-        )
-        
-        tipo_material = st.multiselect(
-            "Material excedente observado",
-            ["orgánico / húmedo", "cartón y papel", "plástico", "escombros / voluminosos"]
-        )
-        
-        observaciones = st.text_area(
-            "Observaciones de campo",
-            placeholder="ej. contenedor vandalizado o acceso bloqueado por vehículos mal estacionados."
-        )
-        
-        enviar_reporte = st.form_submit_button("Transmitir reporte a la central")
-        
-        if enviar_reporte:
-            hora_actual = datetime.now().strftime("%H:%M")
-            st.success(f"reporte enviado con éxito a la central a las {hora_actual}.")
-            st.info("alerta incorporada al cálculo dinámico de prioridades logísticas.")
+    st.markdown("""
+    <style>
+    div[data-testid="stSegmentedControl"] button {min-height: 48px; padding: 10px 16px;}
+    div[data-testid="stCheckbox"] {padding: 5px 0;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    zona_operario = st.selectbox(
+        "Zona de concesión asignada",
+        ["Zona 1 (AESA)", "Zona 2 (Cliba)", "Zona 3 (Solbayres)",
+         "Zona 4 (Nittida)", "Zona 5 (EHU)", "Zona 6 (Ashira)",
+         "Zona 7 (Urbasur)"]
+    )
+
+    st.markdown("**Ubicación del reporte**")
+    st.caption("Tu ubicación se adjuntará automáticamente al enviar el registro, "
+               "si autorizás el acceso a la ubicación de tu dispositivo.")
+    # La geolocalización requiere permiso del navegador y HTTPS (Streamlit Cloud).
+    # Instalación: agregar streamlit-geolocation a requirements.txt.
+    try:
+        from streamlit_geolocation import streamlit_geolocation
+        geolocalizacion = streamlit_geolocation()
+    except ImportError:
+        geolocalizacion = None
+        st.error("Para habilitar la ubicación automática, agregá "
+                 "`streamlit-geolocation` a requirements.txt.")
+    except Exception:
+        geolocalizacion = None
+        st.info("No se pudo obtener la ubicación. Revisá los permisos del navegador.")
+
+    latitud = geolocalizacion.get("latitude") if isinstance(geolocalizacion, dict) else None
+    longitud = geolocalizacion.get("longitude") if isinstance(geolocalizacion, dict) else None
+    ubicacion_lista = latitud is not None and longitud is not None
+    if ubicacion_lista:
+        st.caption("📍 Ubicación obtenida y lista para adjuntar.")
+    else:
+        st.caption("📍 Esperando permiso o señal de ubicación. "
+                   "Activá la ubicación del dispositivo y autorizá al navegador.")
+
+    st.markdown("**¿El contenedor está lleno o desbordado?**")
+    contenedor_lleno = st.segmented_control(
+        "Contenedor", ["Sí", "No"], default=None,
+        selection_mode="single", label_visibility="collapsed",
+        key="operario_contenedor"
+    )
+
+    st.markdown("**¿El sumidero está obstruido?**")
+    sumidero_obstruido = st.segmented_control(
+        "Sumidero", ["Sí", "No"], default=None,
+        selection_mode="single", label_visibility="collapsed",
+        key="operario_sumidero"
+    )
+
+    st.markdown("**¿Hay residuos fuera del contenedor?**")
+    residuos_fuera = st.segmented_control(
+        "Residuos fuera", ["Sí", "No"], default=None,
+        selection_mode="single", label_visibility="collapsed",
+        key="operario_residuos"
+    )
+
+    st.markdown("**Material excedente observado**")
+    st.caption("Seleccioná todas las opciones que correspondan.")
+    materiales = ["Orgánicos", "Papel / cartón", "Plásticos",
+                  "Vidrio", "Escombros", "Otros"]
+    tipo_material = []
+    columnas = st.columns(2)
+    for i, material in enumerate(materiales):
+        with columnas[i % 2]:
+            if st.checkbox(material, key=f"material_{i}"):
+                tipo_material.append(material)
+
+    observaciones = st.text_area(
+        "Observaciones de campo (opcional)",
+        placeholder="Agregá un detalle solamente si es necesario.",
+        height=72
+    )
+
+    enviar_reporte = st.button(
+        "Transmitir reporte a la central",
+        type="primary", use_container_width=True
+    )
+    if enviar_reporte:
+        if any(x is None for x in [contenedor_lleno, sumidero_obstruido, residuos_fuera]):
+            st.error("Respondé las tres preguntas con Sí o No antes de enviar.")
+        elif not ubicacion_lista:
+            st.error("No se pudo adjuntar la ubicación. Activá la ubicación del "
+                     "dispositivo, autorizá el acceso en el navegador e intentá nuevamente.")
+        else:
+            reporte = {
+                "fecha_hora": datetime.now().isoformat(timespec="seconds"),
+                "zona": zona_operario,
+                "latitud": float(latitud),
+                "longitud": float(longitud),
+                "precision_m": geolocalizacion.get("accuracy"),
+                "contenedor_lleno": contenedor_lleno,
+                "sumidero_obstruido": sumidero_obstruido,
+                "residuos_fuera": residuos_fuera,
+                "materiales": ", ".join(tipo_material),
+                "observaciones": observaciones.strip()
+            }
+            # La versión previa solo mostraba un mensaje, sin persistir el reporte.
+            # Este registro queda disponible en la sesión hasta integrar un backend.
+            st.session_state.setdefault("reportes_operario", []).append(reporte)
+            st.success("Reporte registrado en esta sesión con ubicación adjunta.")
+            st.caption("Pendiente: conectar un almacenamiento central persistente "
+                       "para que despacho reciba los reportes entre dispositivos.")
 
 # ---------------------------------------------------------
 # Módulo 2: centro de control logístico y ruteo
@@ -572,14 +628,6 @@ else:
                                         f"Ruta por calles generada: {len(focos)} focos de demanda; "
                                         "inicio y regreso al punto verde de referencia."
                                     )
-                                    if porcentaje_exterior > 1:
-                                        st.warning(
-                                            f"El {porcentaje_exterior:.1f}% de la longitud del trazado "
-                                            "se encuentra fuera del perímetro cartográfico "
-                                            "(con tolerancia aproximada de 40 m). "
-                                            "OSRM no permite prohibir calles fuera de la zona: "
-                                            "esta ruta es una simulación, no una ruta territorialmente garantizada."
-                                        )
                                 else:
                                     st.warning("OSRM no devolvió una geometría vial utilizable.")
                             else:
