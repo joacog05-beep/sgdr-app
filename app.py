@@ -124,6 +124,66 @@ def ordenar_puntos_2opt(punto_inicio, puntos):
                         mejoro = True
     return ruta
 
+def matriz_vial_osrm(puntos):
+    """Distancias dirigidas (metros) sobre calles, no distancias en línea recta."""
+    coords = ";".join(f"{p[0]:.7f},{p[1]:.7f}" for p in puntos)
+    r = requests.get(f"https://router.project-osrm.org/table/v1/driving/{coords}",
+                     params={"annotations": "distance"}, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != "Ok" or not data.get("distances"):
+        raise ValueError("OSRM no devolvió una matriz vial válida")
+    return data["distances"]
+
+
+def optimizar_circuito_vial(matriz, obligatorios, opcionales, presupuesto_extra=0.30):
+    """Inserción de menor costo vial, 2-opt dirigido y presupuesto de desvíos.
+
+    Los índices obligatorios incluyen el depósito (0) y focos. Se incluyen
+    puntos opcionales solo si el costo marginal no excede el presupuesto.
+    """
+    import math
+    def costo(ruta):
+        valores = [matriz[a][b] for a,b in zip(ruta, ruta[1:])]
+        return sum(valores) if all(v is not None for v in valores) else math.inf
+    def insertar_mejor(ruta, nodo):
+        opciones = [(costo(ruta[:k] + [nodo] + ruta[k:]), k)
+                    for k in range(1, len(ruta))]
+        return min(opciones)
+    def mejorar(ruta):
+        actual = costo(ruta)
+        for _ in range(5):
+            mejor = None
+            for i in range(1, len(ruta)-2):
+                for j in range(i+1, len(ruta)-1):
+                    candidata = ruta[:i]+list(reversed(ruta[i:j+1]))+ruta[j+1:]
+                    c = costo(candidata)
+                    if c < actual-1 and (mejor is None or c < mejor[0]):
+                        mejor=(c,candidata)
+            if mejor is None: break
+            actual,ruta=mejor
+        return ruta
+    ruta=[0,0]
+    pendientes=list(obligatorios)
+    while pendientes:
+        alternativas=[(*insertar_mejor(ruta,n),n) for n in pendientes]
+        valor,k,n=min(alternativas)
+        if not math.isfinite(valor):
+            raise ValueError("Los focos obligatorios no están conectados por la red vial")
+        ruta.insert(k,n); pendientes.remove(n)
+    ruta=mejorar(ruta)
+    base=costo(ruta)
+    limite=base*(1+presupuesto_extra)
+    pendientes=list(opcionales)
+    while pendientes:
+        alternativas=[(*insertar_mejor(ruta,n),n) for n in pendientes]
+        valor,k,n=min(alternativas)
+        if not math.isfinite(valor) or valor>limite: break
+        ruta.insert(k,n); pendientes.remove(n)
+        ruta=mejorar(ruta)
+    return ruta, base, costo(ruta)
+
+
 @st.cache_data
 def cargar_geojson_caba():
     url = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
@@ -574,13 +634,18 @@ else:
                 "5. Generar ruta optimizada por asfalto"
             )
 
-            cantidad_cobertura_z5 = 45
+            cantidad_cobertura_z5 = 20
+            presupuesto_desvio_z5 = 30
             if simular_ruta and zona_seleccionada == "Zona 5 (EHU)":
                 cantidad_cobertura_z5 = st.sidebar.slider(
-                    "6. Cobertura adicional de calles (Zona 5)",
-                    min_value=20, max_value=65, value=45, step=5,
-                    help="Puntos de paso simulados repartidos por el territorio. "
-                         "No representan contenedores reales ni garantizan recorrer cada cuadra."
+                    "6. Candidatos para cobertura de calles (Zona 5)",
+                    min_value=10, max_value=35, value=20, step=5,
+                    help="Son candidatos: el optimizador puede descartar los que causen desvíos costosos."
+                )
+                presupuesto_desvio_z5 = st.sidebar.slider(
+                    "7. Máximo desvío respecto de la ruta entre focos (%)",
+                    min_value=0, max_value=60, value=30, step=5,
+                    help="Limita los kilómetros adicionales destinados a ampliar la cobertura."
                 )
 
             if simular_ruta and not df.empty:
@@ -636,11 +701,25 @@ else:
                                 poligono_zona_trabajo, focos,
                                 cantidad=cantidad_cobertura_z5
                             )
-                        orden = ordenar_puntos_2opt(
-                            punto_base, puntos_focos + puntos_cobertura
-                        )
-                        # Cierre del circuito: vuelve al punto de disposición.
-                        ruta_waypoints = [punto_base] + orden[1:] + [punto_base]
+                        # Matriz de distancias por calles. La selección opcional se
+                        # limita por el costo incremental de circulación real.
+                        puntos_matriz = [punto_base] + puntos_focos + puntos_cobertura
+                        try:
+                            matriz = matriz_vial_osrm(puntos_matriz)
+                            indices, distancia_base, distancia_plan = optimizar_circuito_vial(
+                                matriz,
+                                obligatorios=list(range(1, 1 + len(puntos_focos))),
+                                opcionales=list(range(1 + len(puntos_focos), len(puntos_matriz))),
+                                presupuesto_extra=presupuesto_desvio_z5 / 100
+                                if zona_seleccionada == "Zona 5 (EHU)" else 0,
+                            )
+                            ruta_waypoints = [puntos_matriz[i] for i in indices]
+                            cobertura_incluida = sum(i > len(puntos_focos) for i in indices)
+                        except (requests.RequestException, ValueError) as error:
+                            st.error(f"No se pudo optimizar con distancias viales: {error}")
+                            ruta_waypoints = []
+                            cobertura_incluida = 0
+                            distancia_base = distancia_plan = 0
                         coordenadas_str = ";".join(
                             f"{p[0]},{p[1]}" for p in ruta_waypoints
                         )
@@ -650,7 +729,9 @@ else:
                         )
 
                         try:
-                            respuesta = requests.get(url_osrm, timeout=25)
+                            if not ruta_waypoints:
+                                raise ValueError("No se generó un orden de visita válido")
+                            respuesta = requests.get(url_osrm, timeout=30)
                             respuesta.raise_for_status()
                             datos_ruta = respuesta.json()
                             rutas_candidatas = (
@@ -684,7 +765,7 @@ else:
                                     ))
                                     st.success(
                                         f"Ruta por calles generada: {len(focos)} focos prioritarios"
-                                        + (f" y {len(puntos_cobertura)} puntos de cobertura territorial simulada"
+                                        + (f" y {cobertura_incluida} puntos adicionales seleccionados por costo vial"
                                            if puntos_cobertura else "")
                                         + "; inicio y regreso al punto verde de referencia."
                                     )
@@ -698,12 +779,12 @@ else:
                         except Exception as error:
                             st.warning(f"No se pudo validar el recorrido con OSRM: {error}. No se dibujó una ruta aproximada fuera de la red vial.")
 
-                        if puntos_cobertura:
+                        if puntos_cobertura and ruta_waypoints:
                             st.caption(
                                 "Zona 5: los puntos adicionales distribuyen el recorrido por más "
-                                "sectores de la concesión. Son referencias simuladas de cobertura, "
-                                "no ubicaciones verificadas de tachos. El trazado utiliza calles "
-                                "de OSRM, pero no garantiza visitar todas las cuadras."
+                                "sectores de la concesión, pero solo se incorporan si respetan "
+                                "el presupuesto de distancia adicional. No son tachos relevados "
+                                "ni garantizan recorrer todas las cuadras."
                             )
 
                         # Los focos elegidos se destacan en blanco con borde azul; el verde queda reservado
@@ -733,8 +814,10 @@ else:
                             f"{punto_zona.iloc[0]['empresa']}\n"
                             f"**Criterio de selección:** {len(focos)} focos con mayor cantidad de registros "
                             "por celda geográfica, utilizando puntos reales del dataset."
-                            + (f"  \n**Cobertura adicional:** {len(puntos_cobertura)} puntos "
-                               "de paso simulados para ampliar la cobertura de calles de la Zona 5."
+                            + (f"  \n**Cobertura adicional:** {cobertura_incluida} de {len(puntos_cobertura)} "
+                               "candidatos incorporados según su costo vial; "
+                               f"distancia estimada: {distancia_plan/1000:.1f} km "
+                               f"(base {distancia_base/1000:.1f} km)."
                                if puntos_cobertura else "")
                         )
 
