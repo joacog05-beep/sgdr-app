@@ -4,3 +4,4 @@ openpyxl
 pydeck
 requests
 shapely
+streamlit-geolocation
