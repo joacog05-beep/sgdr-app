@@ -6,7 +6,7 @@ import requests
 import os
 import re
 import unicodedata
-from shapely.geometry import shape, mapping, MultiPoint
+from shapely.geometry import shape, mapping, MultiPoint, Point, LineString
 from shapely import wkt
 from shapely.ops import unary_union
 
@@ -15,6 +15,71 @@ st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
 def normalizar(texto):
     if not isinstance(texto, str): return ""
     return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8').strip().upper()
+
+
+def puntos_calientes_representativos(datos, poligono, max_puntos=12, tamano_celda=0.0025):
+    """Selecciona puntos reales de las celdas con mayor densidad, dentro del área."""
+    if datos.empty:
+        return pd.DataFrame()
+
+    candidatos = datos.copy()
+    candidatos["lat"] = pd.to_numeric(candidatos["lat"], errors="coerce")
+    candidatos["long"] = pd.to_numeric(candidatos["long"], errors="coerce")
+    candidatos = candidatos.dropna(subset=["lat", "long"])
+    candidatos = candidatos[
+        candidatos.apply(lambda r: poligono.buffer(0.00035).covers(Point(r["long"], r["lat"])), axis=1)
+    ].copy()
+
+    if candidatos.empty:
+        return candidatos
+
+    # Celdas de aproximadamente 250-280 m: se priorizan las que concentran más registros.
+    candidatos["celda_lat"] = (candidatos["lat"] / tamano_celda).round().astype(int)
+    candidatos["celda_lon"] = (candidatos["long"] / tamano_celda).round().astype(int)
+    conteos = (candidatos.groupby(["celda_lat", "celda_lon"])
+               .size().rename("intensidad").reset_index()
+               .sort_values("intensidad", ascending=False))
+
+    seleccionados = []
+    for _, celda in conteos.head(max_puntos).iterrows():
+        grupo = candidatos[
+            (candidatos["celda_lat"] == celda["celda_lat"]) &
+            (candidatos["celda_lon"] == celda["celda_lon"])
+        ]
+        centro_lat = grupo["lat"].mean()
+        centro_lon = grupo["long"].mean()
+        idx = ((grupo["lat"] - centro_lat) ** 2 + (grupo["long"] - centro_lon) ** 2).idxmin()
+        punto = candidatos.loc[idx].copy()
+        punto["intensidad"] = int(celda["intensidad"])
+        seleccionados.append(punto)
+
+    return pd.DataFrame(seleccionados).drop(columns=["celda_lat", "celda_lon"], errors="ignore")
+
+
+def ordenar_puntos_2opt(punto_inicio, puntos):
+    """Orden inicial por vecino cercano y mejora el orden mediante 2-opt."""
+    pendientes = [list(map(float, p)) for p in puntos]
+    ruta = [list(map(float, punto_inicio))]
+    while pendientes:
+        ultimo = ruta[-1]
+        siguiente = min(pendientes, key=lambda p: (p[0]-ultimo[0])**2 + (p[1]-ultimo[1])**2)
+        ruta.append(siguiente)
+        pendientes.remove(siguiente)
+
+    if len(ruta) > 3:
+        mejoro = True
+        while mejoro:
+            mejoro = False
+            for i in range(1, len(ruta)-2):
+                for j in range(i+1, len(ruta)-1):
+                    a, b = ruta[i-1], ruta[i]
+                    c, d = ruta[j], ruta[j+1]
+                    actual = ((a[0]-b[0])**2 + (a[1]-b[1])**2) ** 0.5 + ((c[0]-d[0])**2 + (c[1]-d[1])**2) ** 0.5
+                    nuevo = ((a[0]-c[0])**2 + (a[1]-c[1])**2) ** 0.5 + ((b[0]-d[0])**2 + (b[1]-d[1])**2) ** 0.5
+                    if nuevo + 1e-12 < actual:
+                        ruta[i:j+1] = reversed(ruta[i:j+1])
+                        mejoro = True
+    return ruta
 
 @st.cache_data
 def cargar_geojson_caba():
@@ -264,7 +329,7 @@ else:
                     "ScatterplotLayer",
                     data=puntos_mapa,
                     get_position=["long", "lat"],
-                    get_fill_color=[190, 30, 45, 230],
+                    get_fill_color=[35, 165, 90, 245],
                     get_line_color=[255, 255, 255, 255],
                     get_radius=150,
                     radius_min_pixels=8,
@@ -274,10 +339,16 @@ else:
                     pickable=True,
                 )
                 capas.append(capa_disposicion)
-                st.caption(
-                    "Los marcadores rojos indican un punto de referencia "
-                    "dentro de cada zona de concesión."
+                st.markdown(
+                    "<div style='display:flex;align-items:center;gap:9px;margin:4px 0 10px 0;'>"
+                    "<span style='display:inline-block;width:11px;height:11px;border-radius:50%;background:#23A55A;border:1px solid white;'></span>"
+                    "<span style='font-size:0.88rem;'>Punto de referencia de disposición</span>"
+                    "</div>",
+                    unsafe_allow_html=True
                 )
+
+        # Geometría de la región operativa (se reutiliza para filtrar y validar el recorrido).
+        poligono_zona_trabajo = None
 
         # Fusión de polígonos
         if zona_seleccionada != "Todas las Zonas":
@@ -297,6 +368,7 @@ else:
                 
                 if poligonos_a_fusionar:
                     zona_fusionada = unary_union(poligonos_a_fusionar).buffer(-0.0001)
+                    poligono_zona_trabajo = zona_fusionada
                     geojson_filtrado = {
                         "type": "FeatureCollection", 
                         "features": [{
@@ -395,11 +467,12 @@ else:
             capas.append(capa_centro)
 
         # ---------------------------------------------------------
-        # Ruteo por asfalto: el punto de disposición es inicio y final.
+        # Ruteo por asfalto: inicio y final en disposición + focos de mayor demanda.
+        # ---------------------------------------------------------
         if zona_seleccionada != "Todas las Zonas":
             st.sidebar.markdown("---")
             simular_ruta = st.sidebar.checkbox(
-                "5. Generar ruta óptima por asfalto (IA)"
+                "5. Generar ruta optimizada por asfalto"
             )
 
             if simular_ruta and not df.empty:
@@ -411,96 +484,118 @@ else:
 
                 if punto_zona.empty:
                     st.error("No se encontró el punto de referencia para la zona seleccionada.")
+                elif poligono_zona_trabajo is None or poligono_zona_trabajo.is_empty:
+                    st.error("No se pudo construir el límite geográfico de la zona. No se generó una ruta sin restricción territorial.")
                 else:
-                    muestra = df.sample(min(15, len(df)), random_state=42)
                     punto_base = [
                         float(punto_zona.iloc[0]["long"]),
                         float(punto_zona.iloc[0]["lat"])
                     ]
-                    pendientes = muestra[["long", "lat"]].astype(float).values.tolist()
 
-                    # Orden heurístico por vecino más cercano desde el punto base.
-                    orden_recoleccion = []
-                    posicion_actual = punto_base
-                    while pendientes:
-                        siguiente = min(
-                            pendientes,
-                            key=lambda p: (p[0] - posicion_actual[0]) ** 2
-                                         + (p[1] - posicion_actual[1]) ** 2
-                        )
-                        orden_recoleccion.append(siguiente)
-                        pendientes.remove(siguiente)
-                        posicion_actual = siguiente
-
-                    # Salida desde disposición, recolección y retorno a disposición.
-                    ruta_optima = [punto_base] + orden_recoleccion + [punto_base]
-                    coordenadas_str = ";".join(
-                        f"{p[0]},{p[1]}" for p in ruta_optima
-                    )
-                    url_osrm = (
-                        "https://router.project-osrm.org/route/v1/driving/"
-                        f"{coordenadas_str}?geometries=geojson&overview=full"
-                    )
-
-                    try:
-                        respuesta = requests.get(url_osrm, timeout=20)
-                        respuesta.raise_for_status()
-                        datos_ruta = respuesta.json()
-                        if datos_ruta.get("code") == "Ok":
-                            geometria_real = datos_ruta["routes"][0]["geometry"]["coordinates"]
-                            camino_final = [{"path": geometria_real}]
-                            st.success(
-                                "Recorrido generado: comienza y finaliza en el "
-                                "punto de referencia de disposición."
+                    # El punto de disposición debe estar dentro de la región operativa.
+                    tolerancia_region = poligono_zona_trabajo.buffer(0.00035)
+                    if not tolerancia_region.covers(Point(punto_base[0], punto_base[1])):
+                        st.error("El punto de disposición calculado queda fuera del área operativa. Revisá la geometría del Excel antes de rutear.")
+                    else:
+                        # Solo se consideran registros dentro del polígono real de la zona.
+                        df_ruteo = df[
+                            df.apply(
+                                lambda r: tolerancia_region.covers(Point(float(r["long"]), float(r["lat"]))),
+                                axis=1
                             )
+                        ].copy()
+
+                        # Se eligen focos densos y representativos, no una muestra aleatoria.
+                        focos = puntos_calientes_representativos(
+                            df_ruteo, poligono_zona_trabajo, max_puntos=12
+                        )
+
+                        if focos.empty:
+                            st.warning("No se encontraron puntos de recolección dentro del polígono de la zona.")
                         else:
-                            camino_final = [{"path": ruta_optima}]
-                            st.warning("OSRM no pudo resolver la ruta; se muestra una conexión aproximada.")
-                    except Exception as error:
-                        camino_final = [{"path": ruta_optima}]
-                        st.warning(f"No se pudo consultar OSRM ({error}); se muestra una conexión aproximada.")
+                            orden = ordenar_puntos_2opt(
+                                punto_base,
+                                focos[["long", "lat"]].astype(float).values.tolist()
+                            )
+                            # Cierre del circuito: vuelve al punto de disposición.
+                            ruta_waypoints = [punto_base] + orden[1:] + [punto_base]
+                            coordenadas_str = ";".join(
+                                f"{p[0]},{p[1]}" for p in ruta_waypoints
+                            )
+                            url_osrm = (
+                                "https://router.project-osrm.org/route/v1/driving/"
+                                f"{coordenadas_str}?geometries=geojson&overview=full&alternatives=true&steps=false"
+                            )
 
-                    capas.append(pdk.Layer(
-                        "PathLayer",
-                        data=camino_final,
-                        get_path="path",
-                        get_color=[0, 100, 255, 255],
-                        width_scale=20,
-                        width_min_pixels=4,
-                    ))
+                            try:
+                                respuesta = requests.get(url_osrm, timeout=25)
+                                respuesta.raise_for_status()
+                                datos_ruta = respuesta.json()
+                                rutas_candidatas = datos_ruta.get("routes", []) if datos_ruta.get("code") == "Ok" else []
+                                ruta_valida = None
+                                # Se acepta únicamente una alternativa cuyo trazado permanezca en la zona,
+                                # con una tolerancia de 35-40 m por diferencias entre ejes viales y límites.
+                                limite_validacion = poligono_zona_trabajo.buffer(0.0004)
+                                for candidata in sorted(rutas_candidatas, key=lambda r: r.get("duration", float("inf"))):
+                                    coords = candidata.get("geometry", {}).get("coordinates", [])
+                                    if len(coords) >= 2:
+                                        linea = LineString(coords)
+                                        if limite_validacion.covers(linea):
+                                            ruta_valida = candidata
+                                            break
 
-                    capas.append(pdk.Layer(
-                        "ScatterplotLayer",
-                        data=muestra,
-                        get_position=["long", "lat"],
-                        get_fill_color=[255, 255, 255, 255],
-                        get_line_color=[0, 80, 180, 255],
-                        get_radius=65,
-                        radius_min_pixels=4,
-                        stroked=True,
-                        filled=True,
-                    ))
+                                if ruta_valida is not None:
+                                    geometria_real = ruta_valida["geometry"]["coordinates"]
+                                    camino_final = [{"path": geometria_real}]
+                                    capas.append(pdk.Layer(
+                                        "PathLayer", data=camino_final, get_path="path",
+                                        get_color=[0, 100, 255, 255], width_scale=20,
+                                        width_min_pixels=4,
+                                    ))
+                                    st.success(
+                                        f"Ruta validada dentro de la región: {len(focos)} focos de alta concentración, "
+                                        "con salida y regreso al punto de disposición."
+                                    )
+                                elif rutas_candidatas:
+                                    st.warning(
+                                        "OSRM encontró recorridos, pero ninguno de los trazados alternativos "
+                                        "permanece dentro del límite de la zona. Se omitió la línea para no "
+                                        "mostrar un recorrido territorialmente incorrecto. Para garantizar "
+                                        "rutas confinadas se necesita un motor vial configurado con el polígono de exclusión."
+                                    )
+                                else:
+                                    st.warning("OSRM no pudo resolver el circuito completo. No se dibujó una línea recta porque no representaría un recorrido por calles.")
+                            except Exception as error:
+                                st.warning(f"No se pudo validar el recorrido con OSRM: {error}. No se dibujó una ruta aproximada fuera de la red vial.")
 
-                    # Se destaca por encima del resto el punto de disposición.
-                    capas.append(pdk.Layer(
-                        "ScatterplotLayer",
-                        data=punto_zona,
-                        get_position=["long", "lat"],
-                        get_fill_color=[190, 30, 45, 255],
-                        get_line_color=[255, 255, 255, 255],
-                        get_radius=220,
-                        radius_min_pixels=12,
-                        radius_max_pixels=24,
-                        stroked=True,
-                        filled=True,
-                        pickable=True,
-                    ))
+                            # Los focos elegidos se destacan en blanco con borde azul; el verde queda reservado
+                            # para el punto de disposición.
+                            capas.append(pdk.Layer(
+                                "ScatterplotLayer", data=focos,
+                                get_position=["long", "lat"],
+                                get_fill_color=[255, 255, 255, 255],
+                                get_line_color=[0, 80, 180, 255],
+                                get_radius=75, radius_min_pixels=5,
+                                stroked=True, filled=True, pickable=True,
+                            ))
 
-                    st.write(
-                        f"**Punto de referencia:** {punto_zona.iloc[0]['zona']} "
-                        f"— {punto_zona.iloc[0]['empresa']}. El recorrido sale "
-                        "desde este punto, realiza las recolecciones y regresa."
-                    )
+                            # El marcador verde se vuelve a dibujar al final para que quede por encima.
+                            capas.append(pdk.Layer(
+                                "ScatterplotLayer", data=punto_zona,
+                                get_position=["long", "lat"],
+                                get_fill_color=[35, 165, 90, 255],
+                                get_line_color=[255, 255, 255, 255],
+                                get_radius=220, radius_min_pixels=12,
+                                radius_max_pixels=24, stroked=True,
+                                filled=True, pickable=True,
+                            ))
+
+                            st.markdown(
+                                f"**Punto de disposición:** {punto_zona.iloc[0]['zona']} — "
+                                f"{punto_zona.iloc[0]['empresa']}\n"
+                                f"**Criterio de selección:** {len(focos)} focos con mayor cantidad de registros "
+                                "por celda geográfica, utilizando puntos reales del dataset."
+                            )
 
         # Lógica de cámara inteligente (Zoom)
         # ---------------------------------------------------------
@@ -508,6 +603,11 @@ else:
             lat_centro = coord["lat"]
             lon_centro = coord["long"]
             zoom_nivel = 14
+        elif poligono_zona_trabajo is not None and not poligono_zona_trabajo.is_empty:
+            centroide = poligono_zona_trabajo.representative_point()
+            lat_centro = centroide.y
+            lon_centro = centroide.x
+            zoom_nivel = 12.8
         elif not df.empty:
             lat_centro = df['lat'].mean()
             lon_centro = df['long'].mean()
