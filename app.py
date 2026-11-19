@@ -4,6 +4,8 @@ import pydeck as pdk
 from datetime import datetime
 import requests
 import os
+import io
+import math
 import re
 import unicodedata
 from shapely.geometry import shape, mapping, MultiPoint, Point, LineString
@@ -11,6 +13,93 @@ from shapely import wkt
 from shapely.ops import unary_union
 
 st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
+
+# Referencia pública fija: GCBA, Anexo 8, noviembre 2026.
+# Precio al público del gasoil: ARS 2.252,03 por litro.
+# Es una referencia histórica editable, NO una cotización en tiempo real.
+PRECIO_GASOIL_REFERENCIA = 2252.03
+FUENTE_GASOIL = ("GCBA · Anexo 8, costo del combustible y energía · noviembre 2026")
+URL_FUENTE_GASOIL = "https://documentosboletinoficial.buenosaires.gob.ar/publico/PE-RES-MMIGC-SECT-181-26-ANX-2.pdf"
+
+
+# Estaciones de transferencia para residuos húmedos. Las direcciones son
+# referencias; el punto de acceso vial debe ser confirmado por el operador.
+ESTACIONES_TRANSFERENCIA = {
+    "Colegiales": "Crámer 290, Ciudad Autónoma de Buenos Aires, Argentina",
+    "Flores": "Balbastro 3160, Ciudad Autónoma de Buenos Aires, Argentina",
+    "Pompeya": "Zavaleta 858, Ciudad Autónoma de Buenos Aires, Argentina",
+}
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def geocodificar_estacion(nombre):
+    """Nominatim devuelve una ubicación aproximada, no la entrada de camiones."""
+    if nombre not in ESTACIONES_TRANSFERENCIA:
+        return None
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": ESTACIONES_TRANSFERENCIA[nombre], "format": "json", "limit": 1},
+            headers={"User-Agent": "GIRAR-Piloto/1.0 (proyecto académico)"}, timeout=12)
+        r.raise_for_status()
+        resultados = r.json()
+        if resultados:
+            lon, lat = float(resultados[0]["lon"]), float(resultados[0]["lat"])
+            if -58.6 < lon < -58.3 and -34.75 < lat < -34.5:
+                return [lon, lat]
+    except (requests.RequestException, ValueError, KeyError, IndexError):
+        pass
+    return None
+
+def capa_estaciones(datos):
+    """Marcador verde con símbolo ET: estación de transferencia."""
+    if not datos:
+        return []
+    return [
+        pdk.Layer("ScatterplotLayer", data=datos,
+                  get_position=["long", "lat"], get_fill_color=[15, 122, 76, 245],
+                  get_line_color=[255, 255, 255, 255], get_radius=185,
+                  radius_min_pixels=16, radius_max_pixels=24, stroked=True,
+                  filled=True, pickable=True),
+        pdk.Layer("TextLayer", data=datos, get_position=["long", "lat"],
+                  get_text="ET", get_size=14, size_min_pixels=11,
+                  get_color=[255, 255, 255, 255], get_text_anchor="middle",
+                  get_alignment_baseline="center", pickable=True),
+    ]
+
+def metros_trazado(coordenadas):
+    """Distancia aproximada sobre geometría WGS84 mediante haversine."""
+    total = 0.0
+    for (lon1,lat1),(lon2,lat2) in zip(coordenadas, coordenadas[1:]):
+        a1,a2 = math.radians(lat1), math.radians(lat2)
+        dlat,dlon = a2-a1,math.radians(lon2-lon1)
+        h = math.sin(dlat/2)**2+math.cos(a1)*math.cos(a2)*math.sin(dlon/2)**2
+        total += 12742000*math.asin(min(1,math.sqrt(h)))
+    return total
+
+def tramos_cobertura_simulada(coordenadas, focos, progreso):
+    """Clasificación visual de la ruta PLANIFICADA, no de calles verificadas.
+    Progreso manual simulado; no equivale a telemetría GPS.
+    """
+    if len(coordenadas)<2:
+        return []
+    puntos = focos[["long","lat"]].astype(float).values.tolist()
+    longitudes = [metros_trazado([a,b]) for a,b in zip(coordenadas,coordenadas[1:])]
+    total = sum(longitudes)
+    recorrido = 0
+    tramos = []
+    for i,(a,b) in enumerate(zip(coordenadas,coordenadas[1:])):
+        mitad = [(a[0]+b[0])/2,(a[1]+b[1])/2]
+        cerca = any(metros_trazado([mitad,p]) <= 400 for p in puntos)
+        # Gris = tránsito sin foco próximo; NO significa calle exenta de servicio.
+        estado = "Atendida (simulada)" if recorrido+longitudes[i]/2 <= total*progreso/100 else (
+            "Prioridad pendiente" if cerca else "Tránsito / sin prioridad identificada")
+        color = ([22,150,96,240] if estado.startswith("Atendida") else
+                 [244,157,35,240] if cerca else [135,145,156,180])
+        tramos.append({"path":[a,b],"color":color,"estado":estado})
+        recorrido += longitudes[i]
+    return tramos
+
+
 
 def normalizar(texto):
     if not isinstance(texto, str): return ""
@@ -200,13 +289,13 @@ else:
 
 perfil_usuario = st.sidebar.radio(
     "Seleccionar rol operativo",
-    ["centro de control (despacho)", "soy barrendero (reporte de campo)"]
+    ["Centro de control · Mapa", "Simulador de eficiencia", "Soy conductor · Mi turno", "Soy barrendero · Reporte"]
 )
 
 # ---------------------------------------------------------
 # Módulo 1: formulario móvil para cuadrillas
 # ---------------------------------------------------------
-if perfil_usuario == "soy barrendero (reporte de campo)":
+if perfil_usuario == "Soy barrendero · Reporte":
     if os.path.exists("logo.png"):
         st.image("logo.png", width=150)
     else:
@@ -325,7 +414,7 @@ if perfil_usuario == "soy barrendero (reporte de campo)":
 # ---------------------------------------------------------
 # Módulo 2: centro de control logístico y ruteo
 # ---------------------------------------------------------
-else:
+elif perfil_usuario == "Centro de control · Mapa":
     st.subheader("Sistema de gestión dinámica de residuos")
     st.sidebar.markdown("---")
     st.sidebar.write("Parámetros de ruteo")
@@ -472,39 +561,36 @@ else:
                 df = df[df['barrio'] == barrio_seleccionado]
 
         # ---------------------------------------------------------
-        # Puntos de referencia de disposición por zona
+        # Estaciones reales de transferencia de residuos húmedos
         # ---------------------------------------------------------
-        if not df_disposicion.empty:
-            if zona_seleccionada == "Todas las Zonas":
-                puntos_mapa = df_disposicion.copy()
-            else:
-                numero_seleccionado = zona_seleccionada.split("(")[0].strip().upper()
-                puntos_mapa = df_disposicion[
-                    df_disposicion["zona"] == numero_seleccionado
-                ].copy()
-
-            if not puntos_mapa.empty:
-                capa_disposicion = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=puntos_mapa,
-                    get_position=["long", "lat"],
-                    get_fill_color=[35, 165, 90, 245],
-                    get_line_color=[255, 255, 255, 255],
-                    get_radius=150,
-                    radius_min_pixels=8,
-                    radius_max_pixels=18,
-                    stroked=True,
-                    filled=True,
-                    pickable=True,
-                )
-                capas.append(capa_disposicion)
-                st.markdown(
-                    "<div style='display:flex;align-items:center;gap:9px;margin:4px 0 10px 0;'>"
-                    "<span style='display:inline-block;width:11px;height:11px;border-radius:50%;background:#23A55A;border:1px solid white;'></span>"
-                    "<span style='font-size:0.88rem;'>Punto de referencia de disposición</span>"
-                    "</div>",
-                    unsafe_allow_html=True
-                )
+        st.sidebar.markdown("### Destino de descarga")
+        estacion_elegida = st.sidebar.selectbox(
+            "Estación de transferencia (residuos húmedos)",
+            list(ESTACIONES_TRANSFERENCIA),
+            index=2 if zona_seleccionada == "Zona 5 (EHU)" else 0,
+            help="La asignación operativa debe validarse con el supervisor; "
+                 "no se determina exclusivamente por cercanía.",
+        )
+        st.sidebar.caption(ESTACIONES_TRANSFERENCIA[estacion_elegida])
+        punto_estacion = geocodificar_estacion(estacion_elegida)
+        st.sidebar.caption("Coordenadas aproximadas: verificar acceso para camiones.")
+        manual_estacion = st.sidebar.checkbox(
+            "Ingresar coordenadas del acceso verificadas", value=False)
+        if manual_estacion:
+            lon_et = st.sidebar.number_input("Longitud del acceso", value=-58.40,
+                                              format="%.6f", step=0.0001)
+            lat_et = st.sidebar.number_input("Latitud del acceso", value=-34.63,
+                                              format="%.6f", step=0.0001)
+            st.sidebar.caption("Los valores iniciales son ejemplos; reemplazalos por "
+                               "coordenadas verificadas antes de generar la ruta.")
+            confirmar_et = st.sidebar.checkbox("Confirmo coordenadas verificadas")
+            punto_estacion = [lon_et, lat_et] if confirmar_et else None
+        datos_et = ([{"long": punto_estacion[0], "lat": punto_estacion[1],
+                      "nombre": "Estación de transferencia " + estacion_elegida}]
+                    if punto_estacion is not None else [])
+        capas.extend(capa_estaciones(datos_et))
+        st.markdown("🟩 **ET = Estación de transferencia de residuos húmedos.** "
+                    "No representa un relleno sanitario ni una disposición final.")
 
         # Geometría de la región operativa (se reutiliza para filtrar y validar el recorrido).
         poligono_zona_trabajo = None
@@ -649,35 +735,21 @@ else:
                 )
 
             if simular_ruta and not df.empty:
-                numero_seleccionado = zona_seleccionada.split("(")[0].strip().upper()
-                punto_zona = (
-                    df_disposicion[df_disposicion["zona"] == numero_seleccionado]
-                    if not df_disposicion.empty else pd.DataFrame()
-                )
-
-                if punto_zona.empty:
-                    st.error("No se encontró el punto de referencia para la zona seleccionada.")
+                if punto_estacion is None:
+                    st.warning("No se pudo localizar la estación. Ingresá y confirmá "
+                               "las coordenadas del acceso para generar la ruta.")
                 elif poligono_zona_trabajo is None or poligono_zona_trabajo.is_empty:
-                    st.error("No se pudo construir el límite geográfico de la zona. No se generó una ruta sin restricción territorial.")
+                    st.error("No se pudo construir el límite geográfico de la zona.")
                 else:
-                    punto_base = [
-                        float(punto_zona.iloc[0]["long"]),
-                        float(punto_zona.iloc[0]["lat"])
-                    ]
-
-                    # El punto de disposición debe estar dentro de la región operativa.
+                    # La estación de transferencia puede estar FUERA de la concesión.
+                    # Solo los focos de recolección se filtran por el polígono.
+                    punto_base = punto_estacion
                     tolerancia_region = poligono_zona_trabajo.buffer(0.00035)
-                    if not tolerancia_region.covers(Point(punto_base[0], punto_base[1])):
-                        st.warning(
-                            "El punto de referencia obtenido del Excel no coincide con el polígono "
-                            "operativo de barrios. Se utilizará un punto interior de la zona "
-                            "como base de simulación; no representa una instalación real."
-                        )
-                        punto_interior = poligono_zona_trabajo.representative_point()
-                        punto_base = [float(punto_interior.x), float(punto_interior.y)]
-                        punto_zona = punto_zona.copy()
-                        punto_zona.loc[:, "long"] = punto_base[0]
-                        punto_zona.loc[:, "lat"] = punto_base[1]
+                    punto_zona = pd.DataFrame([{
+                        "zona": estacion_elegida,
+                        "empresa": "Estación de transferencia (CEAMSE)",
+                        "long": punto_base[0], "lat": punto_base[1]
+                    }])
                     # Solo se consideran registros dentro del polígono real de la zona.
                     df_ruteo = df[
                         df.apply(
@@ -755,6 +827,14 @@ else:
                                         100 * exterior.length / linea.length
                                         if linea.length else 0.0
                                     )
+                                    st.session_state["girar_ultima_ruta"] = {
+                                        "zona": str(punto_zona.iloc[0]["zona"]),
+                                        "geometria": geometria_real,
+                                        "focos": focos[["long", "lat"]].to_dict("records"),
+                                        "distancia_m": float(candidata.get("distance", 0)),
+                                        "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                        "estacion_transferencia": estacion_elegida,
+                                    }
                                     capas.append(pdk.Layer(
                                         "PathLayer",
                                         data=[{"path": geometria_real}],
@@ -767,7 +847,7 @@ else:
                                         f"Ruta por calles generada: {len(focos)} focos prioritarios"
                                         + (f" y {cobertura_incluida} puntos adicionales seleccionados por costo vial"
                                            if puntos_cobertura else "")
-                                        + "; inicio y regreso al punto verde de referencia."
+                                        + "; inicio y regreso a la estación de transferencia seleccionada."
                                     )
                                 else:
                                     st.warning("OSRM no devolvió una geometría vial utilizable.")
@@ -798,19 +878,11 @@ else:
                             stroked=True, filled=True, pickable=True,
                         ))
 
-                        # El marcador verde se vuelve a dibujar al final para que quede por encima.
-                        capas.append(pdk.Layer(
-                            "ScatterplotLayer", data=punto_zona,
-                            get_position=["long", "lat"],
-                            get_fill_color=[35, 165, 90, 255],
-                            get_line_color=[255, 255, 255, 255],
-                            get_radius=220, radius_min_pixels=12,
-                            radius_max_pixels=24, stroked=True,
-                            filled=True, pickable=True,
-                        ))
+                        # Icono ET sobre la ruta: estación de transferencia.
+                        capas.extend(capa_estaciones(datos_et))
 
                         st.markdown(
-                            f"**Punto de disposición:** {punto_zona.iloc[0]['zona']} — "
+                            f"**Estación de transferencia:** {punto_zona.iloc[0]['zona']} — "
                             f"{punto_zona.iloc[0]['empresa']}\n"
                             f"**Criterio de selección:** {len(focos)} focos con mayor cantidad de registros "
                             "por celda geográfica, utilizando puntos reales del dataset."
@@ -853,3 +925,73 @@ else:
             initial_view_state=vista_inicial,
             layers=capas,
         ))
+
+elif perfil_usuario == "Simulador de eficiencia":
+    st.title("Simulador de eficiencia logística")
+    st.caption("Compará recorridos de igual cobertura y condiciones operativas. "
+               "Los resultados son estimaciones, no ahorros comprobados.")
+    ruta = st.session_state.get("girar_ultima_ruta")
+    if not ruta:
+        st.info("Primero generá una ruta desde Centro de control · Mapa. "
+                "La ruta queda disponible en esta sesión.")
+    else:
+        st.write(f"**{ruta['zona']}** · Ruta generada el {ruta['fecha']}")
+        km_girar = ruta["distancia_m"] / 1000
+        st.metric("Recorrido G.I.R.A.R. (OSRM)", f"{km_girar:.2f} km")
+        km_base = st.number_input(
+            "Distancia del recorrido convencional equivalente (km)",
+            min_value=0.1, value=float(round(max(0.1, km_girar), 2)),
+            step=0.5, help="Ingresá una distancia real de referencia. "
+                           "Por defecto se iguala a la ruta simulada para no inventar ahorros.")
+        consumo = st.number_input("Consumo del camión (L/100 km)",
+                                  min_value=1.0, value=35.0, step=1.0,
+                                  help="Valor ilustrativo: reemplazar por el consumo real del vehículo.")
+        st.markdown("#### Precio del combustible")
+        st.caption(f"Referencia inicial: **$ {PRECIO_GASOIL_REFERENCIA:,.2f} ARS/L** "
+                   f"(gasoil, {FUENTE_GASOIL}). No se actualiza automáticamente.")
+        st.markdown(f"[Consultar fuente pública]({URL_FUENTE_GASOIL})")
+        precio = st.number_input(
+            "Precio pagado por litro de gasoil (ARS/L)",
+            min_value=0.0, value=PRECIO_GASOIL_REFERENCIA, step=10.0,
+            help="Podés reemplazar la referencia por el precio del último abastecimiento.")
+        diferencia_km = km_base - km_girar
+        litros = diferencia_km * consumo / 100
+        pesos = litros * precio
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Diferencia de distancia", f"{diferencia_km:+.2f} km")
+        c2.metric("Combustible estimado", f"{litros:+.2f} L")
+        c3.metric("Diferencia económica", f"$ {pesos:+,.2f} ARS")
+        st.caption("Positivo = ahorro estimado; negativo = sobrecosto estimado. "
+                   "Supone igual cobertura, vehículo, carga y condiciones de circulación; "
+                   "no modela ralentí, detenciones ni pendientes.")
+        comparacion = pd.DataFrame([
+            {"escenario":"Convencional", "distancia_km":km_base,
+             "litros_estimados":km_base*consumo/100, "costo_ars":km_base*consumo/100*precio},
+            {"escenario":"G.I.R.A.R.", "distancia_km":km_girar,
+             "litros_estimados":km_girar*consumo/100, "costo_ars":km_girar*consumo/100*precio}
+        ])
+        st.dataframe(comparacion, hide_index=True, use_container_width=True)
+        st.download_button("Exportar comparación (CSV)",
+                           comparacion.to_csv(index=False).encode("utf-8-sig"),
+                           "eficiencia_girar.csv", "text/csv")
+
+elif perfil_usuario == "Soy conductor · Mi turno":
+    st.title("Mi turno · Conductor")
+    ruta = st.session_state.get("girar_ultima_ruta")
+    if not ruta:
+        st.info("Generá primero una ruta desde Centro de control · Mapa. "
+                "Para compartirla entre dispositivos hace falta una base de datos central.")
+    else:
+        st.caption(f"{ruta['zona']} · {ruta['fecha']}")
+        st.metric("Distancia planificada", f"{ruta['distancia_m']/1000:.1f} km")
+        st.metric("Focos prioritarios", len(ruta["focos"]))
+        avance = st.slider("Avance simulado (%)",0,100,0,5)
+        segmentos = tramos_cobertura_simulada(
+            ruta["geometria"],pd.DataFrame(ruta["focos"]),avance)
+        centro = ruta["geometria"][len(ruta["geometria"])//2]
+        st.pydeck_chart(pdk.Deck(map_provider="carto",map_style="light",
+            initial_view_state=pdk.ViewState(latitude=centro[1],longitude=centro[0],zoom=12),
+            layers=[pdk.Layer("PathLayer",data=segmentos,get_path="path",
+                              get_color="color",width_min_pixels=5)]))
+        st.caption("Verde: avance simulado · Naranja: pendiente cerca de focos · "
+                   "Gris: tránsito sin foco cercano. No equivale a recolección GPS confirmada.")
