@@ -56,6 +56,49 @@ def puntos_calientes_representativos(datos, poligono, max_puntos=12, tamano_celd
     return pd.DataFrame(seleccionados).drop(columns=["celda_lat", "celda_lon"], errors="ignore")
 
 
+def puntos_cobertura_zona5(poligono, focos, cantidad=45):
+    """Puntos sintéticos de paso para ampliar cobertura, NO tachos relevados.
+
+    La grilla es una aproximación de cobertura espacial: OSRM ajusta cada
+    waypoint a la red vial, pero no asegura cubrir todas las calles.
+    """
+    import math
+    minx, miny, maxx, maxy = poligono.bounds
+    lat_media = (miny + maxy) / 2
+    # Grilla de aproximadamente 420 m, expresada en grados geográficos.
+    paso_lat = 420 / 111_320
+    paso_lon = 420 / (111_320 * max(0.2, math.cos(math.radians(lat_media))))
+    existentes = focos[["long", "lat"]].astype(float).values.tolist()
+    candidatos = []
+    fila = 0
+    y = miny + paso_lat / 2
+    while y < maxy:
+        x = minx + paso_lon * (0.5 if fila % 2 == 0 else 1.0)
+        while x < maxx:
+            if poligono.covers(Point(x, y)):
+                candidatos.append([float(x), float(y)])
+            x += paso_lon
+        y += paso_lat
+        fila += 1
+
+    # Cobertura por máxima separación respecto de los puntos ya elegidos.
+    # Así se evitan decenas de waypoints concentrados en una misma manzana.
+    seleccionados = []
+    anclas = existentes[:]
+    def distancia_m2(a, b):
+        return ((a[0]-b[0])*111_320*math.cos(math.radians(lat_media)))**2 + ((a[1]-b[1])*111_320)**2
+
+    while candidatos and len(seleccionados) < cantidad:
+        if anclas:
+            elegido = max(candidatos, key=lambda c: min(distancia_m2(c, a) for a in anclas))
+        else:
+            elegido = candidatos[len(candidatos)//2]
+        seleccionados.append(elegido)
+        anclas.append(elegido)
+        candidatos.remove(elegido)
+    return seleccionados
+
+
 def ordenar_puntos_2opt(punto_inicio, puntos):
     """Orden inicial por vecino cercano y mejora el orden mediante 2-opt."""
     pendientes = [list(map(float, p)) for p in puntos]
@@ -531,6 +574,15 @@ else:
                 "5. Generar ruta optimizada por asfalto"
             )
 
+            cantidad_cobertura_z5 = 45
+            if simular_ruta and zona_seleccionada == "Zona 5 (EHU)":
+                cantidad_cobertura_z5 = st.sidebar.slider(
+                    "6. Cobertura adicional de calles (Zona 5)",
+                    min_value=20, max_value=65, value=45, step=5,
+                    help="Puntos de paso simulados repartidos por el territorio. "
+                         "No representan contenedores reales ni garantizan recorrer cada cuadra."
+                )
+
             if simular_ruta and not df.empty:
                 numero_seleccionado = zona_seleccionada.split("(")[0].strip().upper()
                 punto_zona = (
@@ -577,9 +629,15 @@ else:
                     if focos.empty:
                         st.warning("No se encontraron puntos de recolección dentro del polígono de la zona.")
                     else:
+                        puntos_focos = focos[["long", "lat"]].astype(float).values.tolist()
+                        puntos_cobertura = []
+                        if zona_seleccionada == "Zona 5 (EHU)":
+                            puntos_cobertura = puntos_cobertura_zona5(
+                                poligono_zona_trabajo, focos,
+                                cantidad=cantidad_cobertura_z5
+                            )
                         orden = ordenar_puntos_2opt(
-                            punto_base,
-                            focos[["long", "lat"]].astype(float).values.tolist()
+                            punto_base, puntos_focos + puntos_cobertura
                         )
                         # Cierre del circuito: vuelve al punto de disposición.
                         ruta_waypoints = [punto_base] + orden[1:] + [punto_base]
@@ -625,8 +683,10 @@ else:
                                         width_min_pixels=4,
                                     ))
                                     st.success(
-                                        f"Ruta por calles generada: {len(focos)} focos de demanda; "
-                                        "inicio y regreso al punto verde de referencia."
+                                        f"Ruta por calles generada: {len(focos)} focos prioritarios"
+                                        + (f" y {len(puntos_cobertura)} puntos de cobertura territorial simulada"
+                                           if puntos_cobertura else "")
+                                        + "; inicio y regreso al punto verde de referencia."
                                     )
                                 else:
                                     st.warning("OSRM no devolvió una geometría vial utilizable.")
@@ -637,6 +697,14 @@ else:
                                 )
                         except Exception as error:
                             st.warning(f"No se pudo validar el recorrido con OSRM: {error}. No se dibujó una ruta aproximada fuera de la red vial.")
+
+                        if puntos_cobertura:
+                            st.caption(
+                                "Zona 5: los puntos adicionales distribuyen el recorrido por más "
+                                "sectores de la concesión. Son referencias simuladas de cobertura, "
+                                "no ubicaciones verificadas de tachos. El trazado utiliza calles "
+                                "de OSRM, pero no garantiza visitar todas las cuadras."
+                            )
 
                         # Los focos elegidos se destacan en blanco con borde azul; el verde queda reservado
                         # para el punto de disposición.
@@ -665,6 +733,9 @@ else:
                             f"{punto_zona.iloc[0]['empresa']}\n"
                             f"**Criterio de selección:** {len(focos)} focos con mayor cantidad de registros "
                             "por celda geográfica, utilizando puntos reales del dataset."
+                            + (f"  \n**Cobertura adicional:** {len(puntos_cobertura)} puntos "
+                               "de paso simulados para ampliar la cobertura de calles de la Zona 5."
+                               if puntos_cobertura else "")
                         )
 
         # Lógica de cámara inteligente (Zoom)
