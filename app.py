@@ -51,7 +51,7 @@ def geocodificar_estacion(nombre):
     return None
 
 def capa_estaciones(datos):
-    """Marcador verde con símbolo ET: estación de transferencia."""
+    """Marcador verde REF: referencia aproximada dentro de la zona."""
     if not datos:
         return []
     return [
@@ -61,7 +61,7 @@ def capa_estaciones(datos):
                   radius_min_pixels=16, radius_max_pixels=24, stroked=True,
                   filled=True, pickable=True),
         pdk.Layer("TextLayer", data=datos, get_position=["long", "lat"],
-                  get_text="ET", get_size=14, size_min_pixels=11,
+                  get_text="REF", get_size=11, size_min_pixels=9,
                   get_color=[255, 255, 255, 255], get_text_anchor="middle",
                   get_alignment_baseline="center", pickable=True),
     ]
@@ -560,37 +560,23 @@ elif perfil_usuario == "Centro de control · Mapa":
             if barrio_seleccionado not in ["Todos los Barrios", "Todos los Barrios de la Zona"]:
                 df = df[df['barrio'] == barrio_seleccionado]
 
-        # ---------------------------------------------------------
-        # Estaciones reales de transferencia de residuos húmedos
-        # ---------------------------------------------------------
-        st.sidebar.markdown("### Destino de descarga")
-        estacion_elegida = st.sidebar.selectbox(
-            "Estación de transferencia (residuos húmedos)",
-            list(ESTACIONES_TRANSFERENCIA),
-            index=2 if zona_seleccionada == "Zona 5 (EHU)" else 0,
-            help="La asignación operativa debe validarse con el supervisor; "
-                 "no se determina exclusivamente por cercanía.",
+        # Punto de referencia geográfico de la zona, obtenido del Excel original.
+        # No se requiere geocodificación ni ingreso manual de coordenadas.
+        datos_zona = df_disposicion[
+            df_disposicion["zona"].astype(str).str.upper()
+            == zona_seleccionada.split(" (")[0].upper()
+        ] if not df_disposicion.empty else pd.DataFrame()
+        punto_estacion = (
+            [float(datos_zona.iloc[0]["long"]), float(datos_zona.iloc[0]["lat"])]
+            if not datos_zona.empty else None
         )
-        st.sidebar.caption(ESTACIONES_TRANSFERENCIA[estacion_elegida])
-        punto_estacion = geocodificar_estacion(estacion_elegida)
-        st.sidebar.caption("Coordenadas aproximadas: verificar acceso para camiones.")
-        manual_estacion = st.sidebar.checkbox(
-            "Ingresar coordenadas del acceso verificadas", value=False)
-        if manual_estacion:
-            lon_et = st.sidebar.number_input("Longitud del acceso", value=-58.40,
-                                              format="%.6f", step=0.0001)
-            lat_et = st.sidebar.number_input("Latitud del acceso", value=-34.63,
-                                              format="%.6f", step=0.0001)
-            st.sidebar.caption("Los valores iniciales son ejemplos; reemplazalos por "
-                               "coordenadas verificadas antes de generar la ruta.")
-            confirmar_et = st.sidebar.checkbox("Confirmo coordenadas verificadas")
-            punto_estacion = [lon_et, lat_et] if confirmar_et else None
+        estacion_elegida = "Referencia de " + zona_seleccionada
         datos_et = ([{"long": punto_estacion[0], "lat": punto_estacion[1],
-                      "nombre": "Estación de transferencia " + estacion_elegida}]
+                      "nombre": "Punto de referencia de " + zona_seleccionada}]
                     if punto_estacion is not None else [])
         capas.extend(capa_estaciones(datos_et))
-        st.markdown("🟩 **ET = Estación de transferencia de residuos húmedos.** "
-                    "No representa un relleno sanitario ni una disposición final.")
+        st.caption("Marcador verde: punto de referencia aproximado de la zona. "
+                   "No representa una estación de transferencia verificada.")
 
         # Geometría de la región operativa (se reutiliza para filtrar y validar el recorrido).
         poligono_zona_trabajo = None
@@ -736,18 +722,17 @@ elif perfil_usuario == "Centro de control · Mapa":
 
             if simular_ruta and not df.empty:
                 if punto_estacion is None:
-                    st.warning("No se pudo localizar la estación. Ingresá y confirmá "
-                               "las coordenadas del acceso para generar la ruta.")
+                    st.warning("No se encontró el punto de referencia de esta zona "
+                               "en el dataset de zonas. Revisá el archivo Excel.")
                 elif poligono_zona_trabajo is None or poligono_zona_trabajo.is_empty:
                     st.error("No se pudo construir el límite geográfico de la zona.")
                 else:
-                    # La estación de transferencia puede estar FUERA de la concesión.
-                    # Solo los focos de recolección se filtran por el polígono.
+                    # Punto de referencia dentro de la zona; los focos se filtran por polígono.
                     punto_base = punto_estacion
                     tolerancia_region = poligono_zona_trabajo.buffer(0.00035)
                     punto_zona = pd.DataFrame([{
                         "zona": estacion_elegida,
-                        "empresa": "Estación de transferencia (CEAMSE)",
+                        "empresa": "Punto de referencia aproximado",
                         "long": punto_base[0], "lat": punto_base[1]
                     }])
                     # Solo se consideran registros dentro del polígono real de la zona.
@@ -833,7 +818,7 @@ elif perfil_usuario == "Centro de control · Mapa":
                                         "focos": focos[["long", "lat"]].to_dict("records"),
                                         "distancia_m": float(candidata.get("distance", 0)),
                                         "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                                        "estacion_transferencia": estacion_elegida,
+                                        "punto_referencia": estacion_elegida,
                                     }
                                     capas.append(pdk.Layer(
                                         "PathLayer",
@@ -878,11 +863,11 @@ elif perfil_usuario == "Centro de control · Mapa":
                             stroked=True, filled=True, pickable=True,
                         ))
 
-                        # Icono ET sobre la ruta: estación de transferencia.
+                        # Marcador de referencia aproximada sobre la ruta.
                         capas.extend(capa_estaciones(datos_et))
 
                         st.markdown(
-                            f"**Estación de transferencia:** {punto_zona.iloc[0]['zona']} — "
+                            f"**Punto de referencia:** {punto_zona.iloc[0]['zona']} — "
                             f"{punto_zona.iloc[0]['empresa']}\n"
                             f"**Criterio de selección:** {len(focos)} focos con mayor cantidad de registros "
                             "por celda geográfica, utilizando puntos reales del dataset."
