@@ -17,6 +17,27 @@ st.set_page_config(layout="wide", page_title="G.I.R.A.R. CABA")
 # Referencia pública fija: GCBA, Anexo 8, noviembre 2026.
 # Precio al público del gasoil: ARS 2.252,03 por litro.
 # Es una referencia histórica editable, NO una cotización en tiempo real.
+def formato_ar(valor, decimales=2, signo=False):
+    """Formato argentino: miles con punto y decimales con coma."""
+    patron = f"{valor:+,.{decimales}f}" if signo else f"{valor:,.{decimales}f}"
+    return patron.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def parsear_importe_ar(texto):
+    """Admite 2.252,03, 2252,03 o 2252.03 (decimal simple)."""
+    limpio = str(texto).strip().replace("$", "").replace("ARS", "").replace(" ", "")
+    if not limpio:
+        raise ValueError("El precio no puede quedar vacío")
+    if "," in limpio:
+        limpio = limpio.replace(".", "").replace(",", ".")
+    elif limpio.count(".") > 1:
+        limpio = limpio.replace(".", "")
+    precio = float(limpio)
+    if not math.isfinite(precio) or precio <= 0:
+        raise ValueError("El precio debe ser positivo")
+    return precio
+
+
 PRECIO_GASOIL_REFERENCIA = 2252.03
 FUENTE_GASOIL = ("GCBA · Anexo 8, costo del combustible y energía · noviembre 2026")
 URL_FUENTE_GASOIL = "https://documentosboletinoficial.buenosaires.gob.ar/publico/PE-RES-MMIGC-SECT-181-26-ANX-2.pdf"
@@ -921,43 +942,62 @@ elif perfil_usuario == "Simulador de eficiencia":
                 "La ruta queda disponible en esta sesión.")
     else:
         st.write(f"**{ruta['zona']}** · Ruta generada el {ruta['fecha']}")
-        km_girar = ruta["distancia_m"] / 1000
-        st.metric("Recorrido G.I.R.A.R. (OSRM)", f"{km_girar:.2f} km")
+        km_girar = float(ruta["distancia_m"]) / 1000
+        st.metric("Recorrido G.I.R.A.R. (calculado automáticamente)",
+                  f"{formato_ar(km_girar)} km")
+        st.caption("Esta distancia se obtiene directamente del último recorrido "
+                   "calculado por OSRM en el mapa. Si cambiás la ruta, volvé a "
+                   "generarla en el Centro de control para actualizar esta comparación.")
         km_base = st.number_input(
-            "Distancia del recorrido convencional equivalente (km)",
+            "¿Cuántos kilómetros recorrería el camión sin G.I.R.A.R.?",
             min_value=0.1, value=float(round(max(0.1, km_girar), 2)),
-            step=0.5, help="Ingresá una distancia real de referencia. "
-                           "Por defecto se iguala a la ruta simulada para no inventar ahorros.")
+            step=0.5, format="%.2f",
+            help="Ingresá únicamente la distancia de un recorrido convencional "
+                 "que cubra las mismas calles. El recorrido de G.I.R.A.R. se carga solo.")
         consumo = st.number_input("Consumo del camión (L/100 km)",
                                   min_value=1.0, value=35.0, step=1.0,
-                                  help="Valor ilustrativo: reemplazar por el consumo real del vehículo.")
+                                  help="Valor ilustrativo; reemplazar por el consumo real.")
         st.markdown("#### Precio del combustible")
-        st.caption(f"Referencia inicial: **$ {PRECIO_GASOIL_REFERENCIA:,.2f} ARS/L** "
-                   f"(gasoil, {FUENTE_GASOIL}). No se actualiza automáticamente.")
+        st.caption(
+            f"Referencia de gasoil: **$ {formato_ar(PRECIO_GASOIL_REFERENCIA)} ARS/L** "
+            f"({FUENTE_GASOIL}). Valor fijo, editable y no actualizado en tiempo real.")
         st.markdown(f"[Consultar fuente pública]({URL_FUENTE_GASOIL})")
-        precio = st.number_input(
-            "Precio pagado por litro de gasoil (ARS/L)",
-            min_value=0.0, value=PRECIO_GASOIL_REFERENCIA, step=10.0,
-            help="Podés reemplazar la referencia por el precio del último abastecimiento.")
+        precio_texto = st.text_input(
+            "Precio pagado por litro de gasoil ($ ARS/L)",
+            value=formato_ar(PRECIO_GASOIL_REFERENCIA),
+            help="Escribí, por ejemplo, 2.252,03. Se admite coma decimal. "
+                 "Usá el precio efectivamente pagado si lo conocés.")
+        try:
+            precio = parsear_importe_ar(precio_texto)
+        except ValueError:
+            st.error("Ingresá un precio válido, por ejemplo: 2.252,03")
+            st.stop()
         diferencia_km = km_base - km_girar
         litros = diferencia_km * consumo / 100
         pesos = litros * precio
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Diferencia de distancia", f"{diferencia_km:+.2f} km")
-        c2.metric("Combustible estimado", f"{litros:+.2f} L")
-        c3.metric("Diferencia económica", f"$ {pesos:+,.2f} ARS")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Diferencia de distancia", f"{formato_ar(diferencia_km, signo=True)} km")
+        c2.metric("Combustible estimado", f"{formato_ar(litros, signo=True)} L")
+        c3.metric("Diferencia económica", f"$ {formato_ar(pesos, signo=True)} ARS")
         st.caption("Positivo = ahorro estimado; negativo = sobrecosto estimado. "
-                   "Supone igual cobertura, vehículo, carga y condiciones de circulación; "
-                   "no modela ralentí, detenciones ni pendientes.")
+                   "La comparación presupone igual cobertura, vehículo, carga y "
+                   "condiciones de circulación. No incluye ralentí ni detenciones.")
         comparacion = pd.DataFrame([
-            {"escenario":"Convencional", "distancia_km":km_base,
-             "litros_estimados":km_base*consumo/100, "costo_ars":km_base*consumo/100*precio},
-            {"escenario":"G.I.R.A.R.", "distancia_km":km_girar,
-             "litros_estimados":km_girar*consumo/100, "costo_ars":km_girar*consumo/100*precio}
+            {"Escenario": "Convencional", "Distancia (km)": km_base,
+             "Combustible (L)": km_base * consumo / 100,
+             "Costo (ARS)": km_base * consumo / 100 * precio},
+            {"Escenario": "G.I.R.A.R.", "Distancia (km)": km_girar,
+             "Combustible (L)": km_girar * consumo / 100,
+             "Costo (ARS)": km_girar * consumo / 100 * precio}
         ])
-        st.dataframe(comparacion, hide_index=True, use_container_width=True)
+        tabla_visible = comparacion.copy()
+        tabla_visible["Distancia (km)"] = tabla_visible["Distancia (km)"].map(formato_ar)
+        tabla_visible["Combustible (L)"] = tabla_visible["Combustible (L)"].map(formato_ar)
+        tabla_visible["Costo (ARS)"] = tabla_visible["Costo (ARS)"].map(
+            lambda v: f"$ {formato_ar(v)}")
+        st.dataframe(tabla_visible, hide_index=True, use_container_width=True)
         st.download_button("Exportar comparación (CSV)",
-                           comparacion.to_csv(index=False).encode("utf-8-sig"),
+                           comparacion.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                            "eficiencia_girar.csv", "text/csv")
 
 elif perfil_usuario == "Soy conductor · Mi turno":
